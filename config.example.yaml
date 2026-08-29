@@ -1,0 +1,26 @@
+# Copy to config.yaml and fill credentials locally.
+# Never commit config.yaml or real credentials.
+
+source_directory: "/Users/three_water/Downloads"
+nas_mount_path: "/Volumes/video"
+nas_target_directory: "/Volumes/video/AV/censored"
+min_video_size_mb: 200
+dry_run: true
+max_actresses_in_filename: 3
+
+qbittorrent:
+  host: "127.0.0.1"
+  port: 8080
+  username: ""
+  password: ""
+
+metadata:
+  request_timeout_seconds: 15
+  request_interval_seconds: 1
+
+upload:
+  verification_mode: "size"
+  buffer_size_mib: 8
+
+database_path: "data/av_nas_manager.sqlite3"
+log_path: "data/av-nas-manager.log"

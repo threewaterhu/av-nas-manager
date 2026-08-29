@@ -1,0 +1,2 @@
+# No third-party runtime dependencies are required in phase 1.
+# Dependencies will be added deliberately when implementation begins.

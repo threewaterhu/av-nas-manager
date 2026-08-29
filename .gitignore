@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local configuration and secrets
+config.yaml
+config.local.yaml
+.env
+.env.*
+*.pem
+*.key
+*.crt
+credentials*.json
+secrets*.yaml
+.netrc
+*.cookie
+cookies/
+cookies*.txt
+session*.json
+
+# State databases and logs
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+logs/
+
+# Video and partial-upload files
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.m4v
+*.wmv
+*.flv
+*.webm
+*.ts
+*.m2ts
+*.uploading
+
+# macOS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Keep empty scaffold directories in Git
+!src/.gitkeep
+!tests/.gitkeep
+!data/.gitkeep
