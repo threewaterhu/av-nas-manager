@@ -65,6 +65,29 @@ class PathMatchingTests(unittest.TestCase):
             match_qbit_file(Path("/local/movie.mp4"), first.size, [first, second])
         )
 
+    def test_standardized_rename_matches_unique_code_and_exact_size(self) -> None:
+        item = record(
+            save_path="/Downloads/SNOS-339",
+            content_path="/Downloads/SNOS-339/4k688.com@SNOS-339.mp4",
+            file_name="4k688.com@SNOS-339.mp4",
+            size=123456,
+        )
+        matched = match_qbit_file(
+            Path("/Downloads/SNOS-339/SNOS-339 Actress.mp4"), 123456, [item]
+        )
+        self.assertEqual(matched, item)
+
+    def test_code_and_size_fallback_must_be_unique(self) -> None:
+        first = record(file_name="site@SNOS-339.mp4", size=123456)
+        second = record(file_name="other@SNOS-339.mkv", size=123456)
+        self.assertIsNone(
+            match_qbit_file(
+                Path("/Downloads/SNOS-339/SNOS-339 Actress.mp4"),
+                123456,
+                [first, second],
+            )
+        )
+
 
 class FakeClient:
     def get_torrents(self) -> list[Torrent]:

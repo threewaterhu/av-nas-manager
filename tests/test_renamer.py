@@ -1,10 +1,22 @@
 import unittest
 from pathlib import Path
 
-from src.renamer import propose_filename, sanitize_component
+from src.renamer import (
+    propose_filename,
+    propose_preserved_fallback_filename,
+    sanitize_component,
+)
 
 
 class RenamerTests(unittest.TestCase):
+    def test_fc2_ppv_compact_code_is_removed_from_fallback_description(self) -> None:
+        proposed, description, unsafe = propose_preserved_fallback_filename(
+            Path("FC2PPV-3237031 Yua Mikami.mp4"), "FC2-PPV-3237031"
+        )
+        self.assertEqual(description, "Yua Mikami")
+        self.assertEqual(proposed, "FC2-PPV-3237031 Yua Mikami.mp4")
+        self.assertFalse(unsafe)
+
     def test_single_actress(self) -> None:
         proposed = propose_filename(
             Path("ABC-123 1080p.mp4"), "ABC-123", ("Actress Name",)

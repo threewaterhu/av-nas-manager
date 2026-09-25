@@ -7,18 +7,27 @@ from pathlib import Path
 
 from src.config import load_config
 from src.metadata import MetadataCache, MetadataService
+from src.metadata.base import MetadataStatus
 from src.metadata.provider_avwiki import AVWikiProvider
 from src.metadata.provider_javlibrary import JavLibraryProvider
 from src.nas import check_nas
+from src.nas_rename import (
+    NASRenameAction,
+    NASRenamePlan,
+    NASRenameStatus,
+    build_nas_rename_plans,
+    execute_nas_rename,
+    reject_batch_target_collisions,
+)
 from src.qbittorrent_client import QBittorrentClient, QBittorrentError
 from src.rename_operation import (
     RenamePlan,
     RenameStatus,
-    discover_approved_candidates,
     execute_rename,
     preflight_rename,
 )
-from src.scanner import ScanStatus, collect_qbit_files, scan_directory
+from src.product_code import ProductCodeStatus, extract_product_code
+from src.scanner import ScanResult, ScanStatus, collect_qbit_files, scan_directory
 from src.upload import (
     UploadAction,
     UploadPlan,
@@ -30,23 +39,6 @@ from src.upload import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APPROVED_CODES = (
-    "259LUXU-1891",
-    "DASS-356",
-    "JUR-092",
-    "KING-296",
-    "KING-298",
-    "MFYD-165",
-    "MRSS-190",
-    "SIMW-010",
-    "SNOS-275",
-    "SNOS-353",
-    "SPJUR-001",
-    "START-511",
-    "START-603",
-)
-
-
 def _yes_no(value: bool) -> str:
     return "YES" if value else "NO"
 
@@ -65,25 +57,37 @@ def _metadata_service(config: object) -> MetadataService:
     )
 
 
-def _build_rename_plans(config: object, qbit_records: list[object]):
-    candidates = discover_approved_candidates(
-        config.source_directory, set(APPROVED_CODES)
-    )
-    service = _metadata_service(config)
+def _current_complete_candidates(
+    scan_results: list[ScanResult],
+) -> dict[str, list[Path]]:
+    """Build the ephemeral work queue exclusively from this scan's COMPLETE files."""
+    candidates: dict[str, list[Path]] = {}
+    for result in scan_results:
+        if result.status != ScanStatus.COMPLETE:
+            continue
+        code = extract_product_code(result.path.name)
+        if code.status != ProductCodeStatus.FOUND or not code.normalized_code:
+            continue
+        candidates.setdefault(code.normalized_code, []).append(result.path)
+    return candidates
+
+
+def _build_rename_plans(
+    config: object,
+    qbit_records: list[object],
+    scan_results: list[ScanResult],
+    metadata_service: MetadataService | None = None,
+):
+    candidates = _current_complete_candidates(scan_results)
+    service = metadata_service or _metadata_service(config)
     items = []
-    for code in APPROVED_CODES:
-        paths = candidates[code]
+    for code, paths in sorted(candidates.items()):
+        paths = sorted(paths)
         metadata = service.get(code)
-        if len(paths) == 0:
-            missing = config.source_directory / f"<missing-{code}>"
-            plan = RenamePlan(
-                code, missing, missing, RenameStatus.SKIPPED,
-                "no local video with this approved code was found",
-            )
-        elif len(paths) > 1:
+        if len(paths) > 1:
             plan = RenamePlan(
                 code, paths[0], paths[0], RenameStatus.NEEDS_REVIEW,
-                "multiple local videos have this approved code: "
+                "multiple current COMPLETE videos have this product code: "
                 + ", ".join(str(path) for path in paths),
             )
         else:
@@ -115,35 +119,34 @@ def _print_rename_plan(plan: RenamePlan, metadata: object) -> None:
     print(f"Reason: {plan.reason}")
 
 
-def _build_upload_plans(config: object, qbit_records: list[object]) -> list[UploadPlan]:
-    candidates = discover_approved_candidates(
-        config.source_directory, set(APPROVED_CODES)
-    )
+def _build_upload_plans(
+    config: object,
+    qbit_records: list[object],
+    rename_items: list[tuple[RenamePlan, object]],
+) -> list[UploadPlan]:
+    """Plan uploads only for current scan items; history never creates work."""
     plans = []
-    for code in APPROVED_CODES:
-        paths = candidates[code]
-        if len(paths) == 1:
+    for rename_plan, _metadata in rename_items:
+        code = rename_plan.product_code
+        path = rename_plan.original_path
+        if rename_plan.status == RenameStatus.ALREADY_STANDARDIZED:
             plans.append(
                 plan_upload(
-                    paths[0], code, config.nas_target_directory,
+                    path, code, config.nas_target_directory,
                     qbit_records, config.min_video_size_mb,
                 )
             )
             continue
-        placeholder = paths[0] if paths else config.source_directory / f"<missing-{code}>"
         plans.append(
             UploadPlan(
                 product_code=code,
-                local_path=placeholder,
-                local_size=placeholder.stat().st_size if placeholder.is_file() else 0,
-                nas_final_path=config.nas_target_directory / placeholder.name,
-                nas_temp_path=config.nas_target_directory / f"{placeholder.name}.uploading",
+                local_path=path,
+                local_size=path.stat().st_size if path.is_file() else 0,
+                nas_final_path=config.nas_target_directory / path.name,
+                nas_temp_path=config.nas_target_directory / f"{path.name}.uploading",
                 action=UploadAction.SKIPPED,
-                reason=(
-                    "no approved local source was found"
-                    if not paths
-                    else "multiple local files have this approved code"
-                ),
+                reason="current local file must pass rename standardization before upload: "
+                + rename_plan.reason,
             )
         )
     return plans
@@ -165,14 +168,185 @@ def _print_upload_plan(plan: UploadPlan) -> None:
     print(f"Reason: {plan.reason}")
 
 
+def _print_nas_rename_plan(plan: NASRenamePlan) -> None:
+    print("\n---")
+    print(f"Current filename: {plan.current_path.name}")
+    print(f"Current bytes: {plan.current_size}")
+    print(f"Product code: {plan.product_code or '-'}")
+    print(f"Canonical base code: {plan.canonical_base_code or '-'}")
+    print(f"Display code: {plan.display_code or '-'}")
+    print(f"Part flag: {plan.part_flag or 'None'}")
+    print(f"Subtitle flag: {plan.subtitle_flag or 'None'}")
+    print(f"Extra token: {plan.extra_token or 'None'}")
+    print(f"Recovery kind: {plan.recovery_kind or 'None'}")
+    print(f"Recovery outcome: {plan.recovery_outcome.value}")
+    print(f"Raw parser candidates: {', '.join(plan.raw_candidates) if plan.raw_candidates else '-'}")
+    print(f"Metadata status: {plan.metadata.status.value if plan.metadata else 'NOT_QUERIED'}")
+    print(f"Metadata source: {plan.metadata.source if plan.metadata and plan.metadata.source else '-'}")
+    print(
+        "Actresses: "
+        + (", ".join(plan.metadata.actresses) if plan.metadata and plan.metadata.actresses else "-")
+    )
+    if plan.current_description:
+        print(f"Current description: {plan.current_description}")
+    print(f"Proposed filename: {plan.proposed_path.name if plan.proposed_path else '-'}")
+    print(f"Status: {plan.status.value}")
+    print(f"Planned action: {plan.action.value}")
+    print(f"Reason: {plan.reason}")
+    if plan.duplicate_files:
+        for path in plan.duplicate_files:
+            print(f"Duplicate: {path.name} ({path.stat().st_size} bytes)")
+    if plan.conflict_path:
+        size = plan.conflict_path.stat().st_size if plan.conflict_path.is_file() else "not-a-file"
+        print(f"Target conflict: {plan.conflict_path.name} ({size} bytes)")
+
+
+def _run_nas_rename(config: object, execute: bool) -> int:
+    nas = check_nas(config.nas_mount_path, config.nas_target_directory)
+    print("av-nas-manager NAS rename")
+    print(f"MODE: {'EXPLICIT NAS RENAME' if execute else 'NAS RENAME PREVIEW ONLY'}")
+    print(f"NAS mount: {config.nas_mount_path}")
+    print(f"NAS target: {config.nas_target_directory}")
+    if not nas.mounted or not nas.target_exists or not nas.target_is_directory or not nas.readable:
+        print("REFUSED: NAS mount and readable target directory are required")
+        return 2
+    if execute and not nas.writable:
+        print("REFUSED: NAS target directory is not writable")
+        return 2
+
+    def show_progress(done: int, total: int) -> None:
+        if done == total or done % 10 == 0:
+            print(f"Planning: {done}/{total}", flush=True)
+
+    metadata_service = _metadata_service(config)
+    plans = build_nas_rename_plans(
+        config.nas_target_directory,
+        metadata_service,
+        config.max_actresses_in_filename,
+        progress=show_progress,
+    )
+    if execute:
+        plans = reject_batch_target_collisions(plans)
+    original_plans = plans
+    for plan in plans:
+        _print_nas_rename_plan(plan)
+
+    if execute:
+        print("\nNAS RENAME RESULTS")
+        results = []
+        for plan in plans:
+            result = execute_nas_rename(
+                plan,
+                config.nas_mount_path,
+                config.nas_target_directory,
+                metadata_service,
+                config.max_actresses_in_filename,
+            )
+            results.append(result)
+            if plan.action == NASRenameAction.RENAME:
+                print(
+                    f"{result.status.value}: {plan.current_path.name} -> "
+                    f"{plan.proposed_path.name if plan.proposed_path else '-'} "
+                    f"({result.reason})"
+                )
+        plans = results
+
+    def count_status(status: NASRenameStatus) -> int:
+        return sum(plan.status == status for plan in original_plans)
+
+    needs_review = sum(
+        plan.action == NASRenameAction.NEEDS_REVIEW for plan in original_plans
+    )
+    print("\nNAS RENAME SUMMARY")
+    print(f"Scanned videos: {len(original_plans)}")
+    print(f"Already standardized: {count_status(NASRenameStatus.ALREADY_STANDARDIZED)}")
+    print(f"Suggested rename: {sum(plan.action == NASRenameAction.RENAME for plan in original_plans)}")
+    print(
+        "Rename metadata found: "
+        + str(sum(
+            plan.action == NASRenameAction.RENAME
+            and plan.metadata is not None
+            and plan.metadata.status in {MetadataStatus.FOUND, MetadataStatus.MANUAL_CONFIRMED}
+            for plan in original_plans
+        ))
+    )
+    print(f"Rename non-actress suffix: {count_status(NASRenameStatus.RENAME_NON_ACTRESS_SUFFIX)}")
+    print(
+        "Rename authoritative metadata: "
+        + str(count_status(NASRenameStatus.RENAME_AUTHORITATIVE_METADATA))
+    )
+    print(
+        "Rename normalized code: "
+        + str(sum(
+            plan.action == NASRenameAction.RENAME and plan.normalized_code_changed
+            for plan in original_plans
+        ))
+    )
+    print(
+        "Rename subtitle suffix corrected: "
+        + str(sum(
+            plan.action == NASRenameAction.RENAME and plan.subtitle_flag is not None
+            for plan in original_plans
+        ))
+    )
+    print(
+        "Metadata not found: "
+        + str(sum(plan.metadata is not None and plan.metadata.status.value == "NOT_FOUND" for plan in original_plans))
+    )
+    print(
+        "Metadata not found fallback: "
+        + str(sum(
+            plan.status == NASRenameStatus.METADATA_NOT_FOUND
+            and plan.action == NASRenameAction.RENAME
+            for plan in original_plans
+        ))
+    )
+    print(f"Product code not found: {count_status(NASRenameStatus.PRODUCT_CODE_NOT_FOUND)}")
+    print(f"No code in filename: {count_status(NASRenameStatus.NO_CODE_IN_FILENAME)}")
+    print(
+        "Recovered code metadata found: "
+        + str(sum(
+            plan.recovery_outcome.value == "RECOVERED_CODE_METADATA_FOUND"
+            for plan in original_plans
+        ))
+    )
+    print(
+        "Recovered code metadata not found: "
+        + str(count_status(NASRenameStatus.RECOVERED_CODE_METADATA_NOT_FOUND))
+    )
+    print(f"Needs review multipart: {count_status(NASRenameStatus.NEEDS_REVIEW_MULTI_PART)}")
+    print(f"Ambiguous product code: {count_status(NASRenameStatus.AMBIGUOUS_PRODUCT_CODE)}")
+    print(f"Duplicate code files: {count_status(NASRenameStatus.NEEDS_REVIEW_DUPLICATE_CODE)}")
+    print(f"Metadata conflicts: {count_status(NASRenameStatus.NEEDS_REVIEW_METADATA_CONFLICT)}")
+    print(f"Suffix ambiguity: {count_status(NASRenameStatus.NEEDS_REVIEW_SUFFIX_AMBIGUITY)}")
+    print(f"Information loss review: {count_status(NASRenameStatus.NEEDS_REVIEW_INFORMATION_LOSS)}")
+    print(f"Target exists: {count_status(NASRenameStatus.NEEDS_REVIEW_TARGET_EXISTS)}")
+    print(f"Needs review: {needs_review}")
+    if execute:
+        print(f"RENAMED_OK: {sum(plan.status == NASRenameStatus.RENAMED_OK for plan in plans)}")
+        print(f"SKIPPED_STATE_CHANGED: {sum(plan.status == NASRenameStatus.SKIPPED_STATE_CHANGED for plan in plans)}")
+        print(f"FAILED: {sum(plan.status == NASRenameStatus.FAILED for plan in plans)}")
+        renamed = [plan for plan in plans if plan.status == NASRenameStatus.RENAMED_OK]
+        print(
+            "RENAMED_SIZE_VERIFIED: "
+            + f"{sum(plan.size_after == plan.current_size for plan in renamed)}/{len(renamed)}"
+        )
+        return 0 if not any(plan.status == NASRenameStatus.FAILED for plan in plans) else 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv not in ([], ["rename"], ["upload"]):
-        print("Usage: python main.py [rename|upload]")
+    if argv not in ([], ["rename"], ["upload"], ["nas-rename-preview"], ["nas-rename"]):
+        print("Usage: python main.py [rename|upload|nas-rename-preview|nas-rename]")
         return 2
+    config = load_config(PROJECT_ROOT / "config.yaml")
+    if argv == ["nas-rename-preview"]:
+        return _run_nas_rename(config, execute=False)
+    if argv == ["nas-rename"]:
+        return _run_nas_rename(config, execute=True)
     rename_mode = argv == ["rename"]
     upload_mode = argv == ["upload"]
-    config = load_config(PROJECT_ROOT / "config.yaml")
     print("av-nas-manager phase 5")
     mode = "EXPLICIT LOCAL RENAME" if rename_mode else (
         "EXPLICIT NAS UPLOAD" if upload_mode else "PREVIEW ONLY"
@@ -230,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
     if not rename_mode and not upload_mode and not config.dry_run:
         print("REFUSED: ordinary preview requires dry_run: true")
         return 2
-    plan_items = _build_rename_plans(config, qbit_records)
+    plan_items = _build_rename_plans(config, qbit_records, results)
     for plan, metadata in plan_items:
         _print_rename_plan(plan, metadata)
 
@@ -264,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if blocked == 0 else 1
 
     print("\nNAS Upload Preview")
-    upload_plans = _build_upload_plans(config, qbit_records)
+    upload_plans = _build_upload_plans(config, qbit_records, plan_items)
     for plan in upload_plans:
         _print_upload_plan(plan)
     if not upload_mode:

@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable
 
+from .product_code import ProductCodeStatus, extract_product_code
 from .qbittorrent_client import QBittorrentClient, Torrent, TorrentFile
 
 
@@ -91,7 +92,27 @@ def match_qbit_file(path: Path, size: int, records: Iterable[QbitFileRecord]) ->
         if unicodedata.normalize("NFC", Path(record.file_name).name).casefold() == basename
         and record.size == size
     ]
-    return fallback[0] if len(fallback) == 1 else None
+    if len(fallback) == 1:
+        return fallback[0]
+    if len(fallback) > 1:
+        return None
+
+    # A local same-directory rename intentionally leaves qBittorrent's stored
+    # path stale. Preserve the safety signal by requiring one unique record with
+    # the same normalized product code and exact byte size.
+    local_code = extract_product_code(path.name)
+    if local_code.status != ProductCodeStatus.FOUND:
+        return None
+    code_matches = []
+    for record in records:
+        record_code = extract_product_code(Path(record.file_name).name)
+        if (
+            record_code.status == ProductCodeStatus.FOUND
+            and record_code.normalized_code == local_code.normalized_code
+            and record.size == size
+        ):
+            code_matches.append(record)
+    return code_matches[0] if len(code_matches) == 1 else None
 
 
 def collect_qbit_files(client: QBittorrentClient) -> list[QbitFileRecord]:

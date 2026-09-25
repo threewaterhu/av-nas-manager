@@ -58,7 +58,21 @@ python main.py rename
 python main.py upload
 ```
 
-仅修改 `dry_run` 永远不会触发 rename 或 upload。
+只读扫描 NAS 目标目录，并 Preview 旧影片的标准化文件名：
+
+```bash
+python main.py nas-rename-preview
+```
+
+显式执行已通过安全检查的 NAS 同目录重命名：
+
+```bash
+python main.py nas-rename
+```
+
+NAS 整理只扫描 `/Volumes/video/AV/censored` 顶层，不递归、不复制、不上传、不删除、不覆盖；同番号重复、metadata 冲突或目标冲突一律标记 `NEEDS_REVIEW`。
+
+仅修改 `dry_run` 永远不会触发 rename、upload 或 NAS rename。
 
 ## 完整处理流程
 

@@ -38,7 +38,14 @@ class MetadataService:
         saw_not_found = False
         for provider in self.providers:
             self._pace()
-            result = provider.fetch(product_code)
+            try:
+                result = provider.fetch(product_code)
+            except Exception as exc:
+                # A malformed or interrupted public response must not abort an
+                # entire Preview batch. Keep the provider failure visible and
+                # allow the configured fallback provider to run.
+                errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+                continue
             if result.status == MetadataStatus.FOUND:
                 self.cache.put(result)
                 return result

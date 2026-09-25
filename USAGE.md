@@ -39,3 +39,11 @@
 7. 查看最终报告，确认 `UPLOADED_VERIFIED` 或 `ALREADY_UPLOADED`。
 
 遇到 `NEEDS_REVIEW` 时停止自动处理并人工核实。程序永远不会自动删除 Mac 本地视频。
+
+整理 NAS 旧影片时，先只运行：
+
+```bash
+python main.py nas-rename-preview
+```
+
+确认 Preview 后才可显式运行 `python main.py nas-rename`。该命令只会在 `/Volumes/video/AV/censored` 原目录内修改文件 basename；遇到重复番号、metadata 冲突或目标冲突不会强制处理。

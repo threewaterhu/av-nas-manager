@@ -27,6 +27,13 @@ class CountingProvider(MetadataProvider):
         )
 
 
+class FailingProvider(MetadataProvider):
+    name = "failing"
+
+    def fetch(self, product_code: str) -> Metadata:
+        raise OSError("incomplete public response")
+
+
 class MetadataTests(unittest.TestCase):
     def test_cache_hit_skips_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -49,6 +56,17 @@ class MetadataTests(unittest.TestCase):
         )
         self.assertEqual(parser.og_title, "Title")
         self.assertEqual(parser.actresses, ["A", "B"])
+
+    def test_provider_exception_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache = MetadataCache(Path(directory) / "cache.sqlite3")
+            fallback = CountingProvider()
+            service = MetadataService(
+                [FailingProvider(), fallback], cache, request_interval_seconds=0
+            )
+            result = service.get("ABC-123")
+            self.assertEqual(result.status, MetadataStatus.FOUND)
+            self.assertEqual(fallback.calls, 1)
 
 
 if __name__ == "__main__":

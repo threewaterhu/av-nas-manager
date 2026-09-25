@@ -11,6 +11,7 @@ import ssl
 
 class MetadataStatus(str, Enum):
     FOUND = "FOUND"
+    MANUAL_CONFIRMED = "MANUAL_CONFIRMED"
     NOT_FOUND = "NOT_FOUND"
     ERROR = "ERROR"
 
